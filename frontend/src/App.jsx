@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import adaptxLogo from "./assets/adaptx-logo.png";
 import {
+  analyzeYouTubeVideo,
   exportPdf,
   generateFullAudio,
   summarizeFile,
@@ -8,6 +9,19 @@ import {
 import "./App.css";
 
 function App() {
+  // ============================================================
+// YOUTUBE VISUAL COMPANION
+// ============================================================
+
+const youtubePlayerRef = useRef(null);
+const youtubeSyncTimerRef = useRef(null);
+
+const [youtubeUrl, setYoutubeUrl] = useState("");
+const [youtubeStatus, setYoutubeStatus] = useState("idle");
+const [youtubeError, setYoutubeError] = useState("");
+const [youtubeLesson, setYoutubeLesson] = useState(null);
+const [youtubeActiveCard, setYoutubeActiveCard] = useState(0);
+const [youtubePlayerReady, setYoutubePlayerReady] = useState(false);
   const fileInputRef = useRef(null);
 
   const [file, setFile] = useState(null);
@@ -334,7 +348,398 @@ function App() {
       fileInputRef.current.value = "";
     }
   };
+  // ============================================================
+  // YOUTUBE VISUAL COMPANION
+  // ============================================================
 
+  const getYouTubeVideoId = (url) => {
+    try {
+      const parsed = new URL(url);
+
+      if (parsed.hostname.includes("youtu.be")) {
+        return parsed.pathname.slice(1);
+      }
+
+      if (parsed.hostname.includes("youtube.com")) {
+        return parsed.searchParams.get("v");
+      }
+
+      return null;
+    } catch {
+      return null;
+    }
+  };
+
+  const handleAnalyzeYouTube = async () => {
+    const videoId = getYouTubeVideoId(youtubeUrl);
+
+    if (!videoId) {
+      setYoutubeError("Please enter a valid YouTube video URL.");
+      return;
+    }
+
+    setYoutubeStatus("loading");
+    setYoutubeError("");
+    setYoutubeLesson(null);
+    setYoutubeActiveCard(0);
+
+    try {
+      const data = await analyzeYouTubeVideo(youtubeUrl);
+
+      setYoutubeLesson(data);
+      setYoutubeStatus("success");
+      setYoutubePlayerReady(false);
+    } catch (err) {
+      setYoutubeError(
+        err.message ||
+          "Failed to prepare the YouTube visual companion."
+      );
+      setYoutubeStatus("error");
+    }
+  };
+
+  // ------------------------------------------------------------
+  // YOUTUBE PLAYER
+  // ------------------------------------------------------------
+
+  useEffect(() => {
+    if (!youtubeLesson) {
+      return;
+    }
+
+    const videoId = youtubeLesson.videoId;
+
+    if (!videoId) {
+      return;
+    }
+
+    const createPlayer = () => {
+      if (!window.YT || !window.YT.Player) {
+        return;
+      }
+
+      if (youtubePlayerRef.current) {
+        youtubePlayerRef.current.destroy();
+        youtubePlayerRef.current = null;
+      }
+
+      youtubePlayerRef.current = new window.YT.Player(
+        "adaptx-youtube-player",
+        {
+          videoId,
+          playerVars: {
+            autoplay: 0,
+            rel: 0,
+            start: Number(
+              youtubeLesson.cards?.[0]?.startTime || 0
+            ),
+          },
+          events: {
+            onReady: () => {
+              setYoutubePlayerReady(true);
+            },
+          },
+        }
+      );
+    };
+
+    if (window.YT && window.YT.Player) {
+      createPlayer();
+      return;
+    }
+
+    const existingScript = document.querySelector(
+      'script[src="https://www.youtube.com/iframe_api"]'
+    );
+
+    if (!existingScript) {
+      const script = document.createElement("script");
+
+      script.src =
+        "https://www.youtube.com/iframe_api";
+
+      script.async = true;
+
+      document.body.appendChild(script);
+    }
+
+    const previousCallback =
+      window.onYouTubeIframeAPIReady;
+
+    window.onYouTubeIframeAPIReady = () => {
+      if (previousCallback) {
+        previousCallback();
+      }
+
+      createPlayer();
+    };
+
+    return () => {
+      if (youtubePlayerRef.current) {
+        youtubePlayerRef.current.destroy();
+        youtubePlayerRef.current = null;
+      }
+
+      setYoutubePlayerReady(false);
+    };
+  }, [youtubeLesson]);
+
+  // ------------------------------------------------------------
+  // SYNC CARD WITH VIDEO
+  // ------------------------------------------------------------
+
+  useEffect(() => {
+    if (
+      !youtubeLesson ||
+      !youtubePlayerReady ||
+      !youtubePlayerRef.current
+    ) {
+      return;
+    }
+
+    const cards = Array.isArray(youtubeLesson.cards)
+      ? youtubeLesson.cards
+      : [];
+
+    if (!cards.length) {
+      return;
+    }
+
+    const syncWithVideo = () => {
+      if (!youtubePlayerRef.current) {
+        return;
+      }
+
+      const currentTime =
+        youtubePlayerRef.current.getCurrentTime();
+
+      let activeIndex = 0;
+
+      cards.forEach((card, index) => {
+        const start = Number(card.startTime || 0);
+
+        if (currentTime >= start) {
+          activeIndex = index;
+        }
+      });
+
+      setYoutubeActiveCard(activeIndex);
+    };
+
+    syncWithVideo();
+
+    youtubeSyncTimerRef.current =
+      window.setInterval(syncWithVideo, 500);
+
+    return () => {
+      if (youtubeSyncTimerRef.current) {
+        window.clearInterval(
+          youtubeSyncTimerRef.current
+        );
+
+        youtubeSyncTimerRef.current = null;
+      }
+    };
+  }, [youtubeLesson, youtubePlayerReady]);
+
+  // ------------------------------------------------------------
+  // YOUTUBE COMPANION
+  // ------------------------------------------------------------
+
+  const renderYouTubeCompanion = () => {
+    if (!youtubeLesson) {
+      return null;
+    }
+
+    const cards = Array.isArray(youtubeLesson.cards)
+      ? youtubeLesson.cards
+      : [];
+
+    const activeCard = cards[youtubeActiveCard];
+
+    return (
+      <section className="youtube-companion-card">
+
+        <div className="workspace-content-heading">
+          <div>
+            <div className="eyebrow">
+              YOUTUBE VISUAL COMPANION
+            </div>
+
+            <h2>
+              Learn the video without depending on audio.
+            </h2>
+
+            <p>
+              AdaptX follows the lesson as it plays and turns
+              important spoken ideas into visual learning cues.
+            </p>
+          </div>
+
+          <span className="workspace-count">
+            {cards.length} visual moments
+          </span>
+        </div>
+
+        <div className="youtube-companion-layout">
+
+          {/* VIDEO */}
+
+          <div className="youtube-player-shell">
+
+            <div
+              id="adaptx-youtube-player"
+              className="youtube-player"
+            />
+
+            <div className="youtube-player-caption">
+              <strong>
+                {youtubeLesson.title || "YouTube lesson"}
+              </strong>
+
+              <span>
+                Visual companion synchronized with playback
+              </span>
+            </div>
+
+          </div>
+
+          {/* COMPANION CARD */}
+
+          <div className="youtube-companion-panel">
+
+            {activeCard ? (
+              <>
+                <div className="youtube-card-progress">
+                  <span>
+                    {String(
+                      youtubeActiveCard + 1
+                    ).padStart(2, "0")}
+                  </span>
+
+                  <span>
+                    OF{" "}
+                    {String(cards.length).padStart(
+                      2,
+                      "0"
+                    )}
+                  </span>
+                </div>
+
+                <div className="youtube-live-badge">
+                  ● LIVE COMPANION
+                </div>
+
+                <h3>
+                  {activeCard.title ||
+                    activeCard.concept}
+                </h3>
+
+                {activeCard.explanation && (
+                  <p className="youtube-card-explanation">
+                    {activeCard.explanation}
+                  </p>
+                )}
+
+                {Array.isArray(
+                  activeCard.visualSteps
+                ) &&
+                  activeCard.visualSteps.length > 0 && (
+                    <div className="youtube-visual-flow">
+
+                      {activeCard.visualSteps.map(
+                        (step, index) => (
+                          <div
+                            className="youtube-visual-step"
+                            key={`${step}-${index}`}
+                          >
+                            <span>
+                              {String(index + 1).padStart(
+                                2,
+                                "0"
+                              )}
+                            </span>
+
+                            <strong>{step}</strong>
+
+                            {index <
+                              activeCard.visualSteps
+                                .length -
+                                1 && (
+                              <i aria-hidden="true">
+                                →
+                              </i>
+                            )}
+                          </div>
+                        )
+                      )}
+
+                    </div>
+                  )}
+
+                {Array.isArray(
+                  activeCard.vocabulary
+                ) &&
+                  activeCard.vocabulary.length > 0 && (
+                    <div className="youtube-vocabulary">
+                      <strong>
+                        KEY VOCABULARY
+                      </strong>
+
+                      <div>
+                        {activeCard.vocabulary.map(
+                          (item, index) => (
+                            <span
+                              key={`${item}-${index}`}
+                            >
+                              {item}
+                            </span>
+                          )
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                {activeCard.takeaway && (
+                  <div className="youtube-takeaway">
+                    <strong>
+                      🧠 Remember
+                    </strong>
+
+                    <p>
+                      {activeCard.takeaway}
+                    </p>
+                  </div>
+                )}
+
+                <button
+                  className="secondary-button"
+                  type="button"
+                  onClick={() => {
+                    youtubePlayerRef.current?.seekTo(
+                      Number(
+                        activeCard.startTime || 0
+                      ),
+                      true
+                    );
+                  }}
+                >
+                  ↺ Replay this concept
+                </button>
+              </>
+            ) : (
+              <div className="workspace-empty">
+                Waiting for the visual companion...
+              </div>
+            )}
+
+          </div>
+
+        </div>
+
+      </section>
+    );
+  };
   const getFileTypeLabel = (fileType) => {
     return fileType === "pdf" ? "PDF" : "TXT";
   };
@@ -1028,6 +1433,65 @@ function App() {
 
     return (
       <article className="workspace-content-card hearing-visual-lesson-card">
+                <section className="youtube-input-card">
+
+          <div>
+            <div className="eyebrow">
+              VIDEO INPUT
+            </div>
+
+            <h3>
+              Turn a YouTube lesson into a visual companion.
+            </h3>
+
+            <p>
+              Paste a public YouTube lesson and AdaptX will
+              follow its spoken content while building visual
+              learning cues.
+            </p>
+          </div>
+
+          <div className="youtube-input-row">
+
+            <input
+              type="url"
+              value={youtubeUrl}
+              onChange={(event) => {
+                setYoutubeUrl(event.target.value);
+                setYoutubeError("");
+              }}
+              placeholder="https://www.youtube.com/watch?v=..."
+              aria-label="YouTube video URL"
+            />
+
+            <button
+              className="primary-button"
+              type="button"
+              onClick={handleAnalyzeYouTube}
+              disabled={youtubeStatus === "loading"}
+            >
+              {youtubeStatus === "loading"
+                ? "Preparing..."
+                : "Adapt Video →"}
+            </button>
+
+          </div>
+
+          {youtubeError && (
+            <div
+              className="error-message"
+              role="alert"
+            >
+              <span>!</span>
+              {youtubeError}
+            </div>
+          )}
+
+        </section>
+
+        {youtubeStatus === "success" &&
+          youtubeLesson &&
+          renderYouTubeCompanion()}
         <div className="workspace-content-heading">
           <div>
             <div className="eyebrow">VISUAL-FIRST LESSON</div>

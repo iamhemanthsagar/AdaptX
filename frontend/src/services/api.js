@@ -112,3 +112,28 @@ export async function exportPdf(lessonData) {
 
   return URL.createObjectURL(pdfBlob);
 }
+// ============================================================
+// YOUTUBE VISUAL COMPANION
+// ============================================================
+
+export async function analyzeYouTubeVideo(url) {
+  const response = await fetch(`${API_BASE_URL}/youtube/analyze`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      url,
+    }),
+  });
+
+  const result = await response.json();
+
+  if (!response.ok || !result.success) {
+    throw new Error(
+      result.error?.message || "Failed to analyze YouTube video."
+    );
+  }
+
+  return result.data;
+}

@@ -621,6 +621,427 @@ ${extractedText}
     });
   }
 });
+// ============================================================
+// YOUTUBE VISUAL COMPANION
+// ============================================================
+
+function extractYouTubeVideoId(url) {
+  try {
+    const parsedUrl = new URL(url);
+
+    if (parsedUrl.hostname.includes("youtu.be")) {
+      return parsedUrl.pathname.replace("/", "").split("/")[0] || null;
+    }
+
+    if (parsedUrl.hostname.includes("youtube.com")) {
+      return parsedUrl.searchParams.get("v");
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+app.post("/api/youtube/analyze", async (req, res) => {
+  try {
+    const { url } = req.body || {};
+
+    if (!url || typeof url !== "string") {
+      return res.status(400).json({
+        success: false,
+        error: {
+          code: "INVALID_YOUTUBE_URL",
+          message: "A YouTube video URL is required.",
+        },
+      });
+    }
+
+    const videoId = extractYouTubeVideoId(url);
+
+    if (!videoId) {
+      return res.status(400).json({
+        success: false,
+        error: {
+          code: "INVALID_YOUTUBE_URL",
+          message: "Please provide a valid YouTube video URL.",
+        },
+      });
+    }
+
+    if (!process.env.SUPADATA_API_KEY) {
+      console.error("SUPADATA_API_KEY is not configured.");
+
+      return res.status(500).json({
+        success: false,
+        error: {
+          code: "MISSING_API_KEY",
+          message: "Supadata API key is not configured.",
+        },
+      });
+    }
+
+    console.log(`Fetching YouTube transcript for ${videoId}...`);
+
+    // --------------------------------------------------------
+    // STEP 1: GET TIMESTAMPED TRANSCRIPT FROM SUPADATA
+    // --------------------------------------------------------
+
+    const transcriptResponse = await fetch(
+      `https://api.supadata.ai/v1/transcript?url=${encodeURIComponent(url)}`,
+      {
+        method: "GET",
+        headers: {
+          "x-api-key": process.env.SUPADATA_API_KEY,
+        },
+      }
+    );
+
+    if (!transcriptResponse.ok) {
+      const errorText = await transcriptResponse.text();
+
+      console.error(
+        "Supadata transcript error:",
+        transcriptResponse.status,
+        errorText
+      );
+
+      return res.status(502).json({
+        success: false,
+        error: {
+          code: "TRANSCRIPT_FAILED",
+          message:
+            "Could not retrieve the YouTube transcript. Please try another public video.",
+        },
+      });
+    }
+
+    const transcriptData = await transcriptResponse.json();
+
+    if (
+      !transcriptData ||
+      !Array.isArray(transcriptData.content) ||
+      transcriptData.content.length === 0
+    ) {
+      return res.status(422).json({
+        success: false,
+        error: {
+          code: "NO_TRANSCRIPT",
+          message:
+            "No usable transcript was found for this YouTube video.",
+        },
+      });
+    }
+
+    console.log(
+      `Received ${transcriptData.content.length} transcript segments.`
+    );
+
+    // --------------------------------------------------------
+    // STEP 2: NORMALIZE TIMESTAMPED TRANSCRIPT
+    // --------------------------------------------------------
+
+    const transcript = transcriptData.content
+      .map((segment) => ({
+        text: String(segment.text || "").trim(),
+        startTime: Number(segment.offset || 0) / 1000,
+        duration: Number(segment.duration || 0) / 1000,
+      }))
+      .filter((segment) => segment.text);
+
+    if (transcript.length === 0) {
+      return res.status(422).json({
+        success: false,
+        error: {
+          code: "EMPTY_TRANSCRIPT",
+          message: "The YouTube transcript did not contain readable text.",
+        },
+      });
+    }
+
+    // --------------------------------------------------------
+    // STEP 3: LIMIT EXTREMELY LARGE TRANSCRIPTS
+    // --------------------------------------------------------
+
+    let transcriptForGemini = transcript;
+
+    const transcriptText = transcript
+      .map(
+        (segment) =>
+          `[${segment.startTime.toFixed(1)}s] ${segment.text}`
+      )
+      .join("\n");
+
+    // Keep the request practical for the hackathon MVP.
+    // We retain timestamps so Gemini can create synchronized cards.
+    if (transcriptText.length > 70000) {
+      transcriptForGemini = transcript.slice(0, 900);
+    }
+
+    const timestampedTranscript = transcriptForGemini
+      .map(
+        (segment) =>
+          `[${segment.startTime.toFixed(1)}s] ${segment.text}`
+      )
+      .join("\n");
+
+    // --------------------------------------------------------
+    // STEP 4: GEMINI BUILDS THE VISUAL COMPANION
+    // --------------------------------------------------------
+
+    const prompt = `
+You are AdaptX, an educational accessibility transformation engine.
+
+Transform the timestamped transcript of a YouTube educational lesson
+into a visual learning companion for a deaf or hard-of-hearing learner.
+
+The goal is NOT to merely create captions.
+
+Instead:
+- identify the important teaching moments
+- group related spoken ideas into visual learning cards
+- make concepts understandable without depending on audio
+- preserve the factual meaning of the transcript
+- use visual structures such as sequences, cause/effect, comparisons,
+  relationships, processes, or text-focused explanations when useful
+- do not invent information
+- do not claim anything that is not supported by the transcript
+- do not create sign-language content
+- keep cards in chronological teaching order
+
+Create approximately 5 to 12 meaningful visual cards.
+
+Each card must represent a useful teaching moment rather than
+a sentence-by-sentence transcript.
+
+IMPORTANT TIMESTAMP RULES:
+- startTime and endTime are seconds from the beginning of the YouTube video.
+- Use the timestamps supplied in the transcript.
+- startTime should correspond to where the concept begins.
+- endTime should correspond to where the concept ends.
+- Cards must be chronological.
+- Do not overlap cards unnecessarily.
+- Keep timestamps realistic and grounded in the transcript.
+
+For each card return:
+
+title:
+A short title for the concept.
+
+concept:
+The main concept being taught.
+
+explanation:
+A concise student-friendly explanation.
+
+visualType:
+Choose one:
+process
+cause-effect
+comparison
+timeline
+cycle
+sequence
+before-after
+classification
+relationship
+text-focus
+
+visualSteps:
+2 to 6 short items that visually communicate the idea.
+For text-focus, use an empty array.
+
+vocabulary:
+0 to 5 important terms from that moment.
+
+takeaway:
+One short sentence explaining what the learner should remember.
+
+startTime:
+Timestamp in seconds.
+
+endTime:
+Timestamp in seconds.
+
+Also return:
+title: a concise title for the overall lesson.
+
+Rules:
+- Stay faithful to the transcript.
+- Never invent facts.
+- Never turn an analogy into a factual statement.
+- Do not reproduce the entire transcript.
+- Do not create captions.
+- Create a visual companion.
+- Return ONLY JSON.
+
+TIMESTAMPED TRANSCRIPT:
+
+${timestampedTranscript}
+`;
+
+    console.log("Sending YouTube lesson to Gemini...");
+
+    const response = await ai.models.generateContent({
+      model: "gemini-3.5-flash",
+      contents: prompt,
+      config: {
+        responseMimeType: "application/json",
+
+        responseSchema: {
+          type: "object",
+
+          properties: {
+            title: {
+              type: "string",
+            },
+
+            cards: {
+              type: "array",
+
+              items: {
+                type: "object",
+
+                properties: {
+                  title: {
+                    type: "string",
+                  },
+
+                  concept: {
+                    type: "string",
+                  },
+
+                  explanation: {
+                    type: "string",
+                  },
+
+                  visualType: {
+                    type: "string",
+                  },
+
+                  visualSteps: {
+                    type: "array",
+                    items: {
+                      type: "string",
+                    },
+                  },
+
+                  vocabulary: {
+                    type: "array",
+                    items: {
+                      type: "string",
+                    },
+                  },
+
+                  takeaway: {
+                    type: "string",
+                  },
+
+                  startTime: {
+                    type: "number",
+                  },
+
+                  endTime: {
+                    type: "number",
+                  },
+                },
+
+                required: [
+                  "title",
+                  "concept",
+                  "explanation",
+                  "visualType",
+                  "visualSteps",
+                  "vocabulary",
+                  "takeaway",
+                  "startTime",
+                  "endTime",
+                ],
+              },
+            },
+          },
+
+          required: ["title", "cards"],
+        },
+      },
+    });
+
+    const aiResult = JSON.parse(response.text);
+
+    // --------------------------------------------------------
+    // STEP 5: CLEAN AND SORT CARDS
+    // --------------------------------------------------------
+
+    const cards = Array.isArray(aiResult.cards)
+      ? aiResult.cards
+          .map((card) => ({
+            title: String(card.title || "").trim(),
+            concept: String(card.concept || "").trim(),
+            explanation: String(card.explanation || "").trim(),
+            visualType: String(card.visualType || "text-focus").trim(),
+
+            visualSteps: Array.isArray(card.visualSteps)
+              ? card.visualSteps.map((item) => String(item))
+              : [],
+
+            vocabulary: Array.isArray(card.vocabulary)
+              ? card.vocabulary.map((item) => String(item))
+              : [],
+
+            takeaway: String(card.takeaway || "").trim(),
+
+            startTime: Math.max(0, Number(card.startTime || 0)),
+            endTime: Math.max(
+              Number(card.startTime || 0),
+              Number(card.endTime || card.startTime || 0)
+            ),
+          }))
+          .filter(
+            (card) =>
+              card.title ||
+              card.concept ||
+              card.explanation
+          )
+          .sort((a, b) => a.startTime - b.startTime)
+      : [];
+
+    if (cards.length === 0) {
+      return res.status(422).json({
+        success: false,
+        error: {
+          code: "NO_VISUAL_CARDS",
+          message:
+            "Gemini could not create visual learning moments from this video.",
+        },
+      });
+    }
+
+    console.log(
+      `YouTube visual companion created successfully with ${cards.length} cards.`
+    );
+
+    return res.json({
+      success: true,
+
+      data: {
+        videoId,
+        title: aiResult.title || "YouTube Lesson",
+        cards,
+      },
+    });
+  } catch (error) {
+    console.error("YouTube analysis error:", error);
+
+    return res.status(500).json({
+      success: false,
+      error: {
+        code: "YOUTUBE_ANALYSIS_FAILED",
+        message:
+          "Failed to create the YouTube visual companion.",
+      },
+    });
+  }
+});
 function validateAudioConfiguration(res) {
   if (!process.env.ELEVENLABS_API_KEY) {
     res.status(500).json({
