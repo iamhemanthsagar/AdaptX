@@ -8,7 +8,7 @@ http://localhost:5000/api
 
 # POST /summarize
 
-Summarizes an uploaded educational document.
+Transforms an uploaded educational document into accessible learning content.
 
 ## Request
 
@@ -29,10 +29,15 @@ Supported files:
 - PDF
 - TXT
 
+Maximum file size:
+
+10 MB
+
 Example frontend:
 
 ```js
 const formData = new FormData();
+
 formData.append("file", selectedFile);
 
 fetch("http://localhost:5000/api/summarize", {
